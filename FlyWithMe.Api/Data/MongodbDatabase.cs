@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Options;
 using Models;
 using MongoDB.Bson;
 using MongoDB.Driver;
@@ -11,15 +12,30 @@ namespace FlyWithMe.Api.Data
 {
     public class MongodbDatabase : IDatabaseAdapter
     {
-        private const string DatabaseName = "flywithme";
-        private const string CollectionName = "flight_plans";
+        private readonly IMongoCollection<BsonDocument> _collection;
 
-        private IMongoCollection<BsonDocument> GetCollection(string databaseName, string collectionName)
+        public MongodbDatabase(IOptions<MongoDbSettings> mongoDbOptions)
         {
-            var client = new MongoClient();
-            var database = client.GetDatabase(databaseName);
-            var collection = database.GetCollection<BsonDocument>(collectionName);
-            return collection;
+            var settings = mongoDbOptions.Value;
+
+            if (string.IsNullOrWhiteSpace(settings.ConnectionString))
+            {
+                throw new InvalidOperationException("MongoDB connection string is not configured.");
+            }
+
+            if (string.IsNullOrWhiteSpace(settings.DatabaseName))
+            {
+                throw new InvalidOperationException("MongoDB database name is not configured.");
+            }
+
+            if (string.IsNullOrWhiteSpace(settings.CollectionName))
+            {
+                throw new InvalidOperationException("MongoDB collection name is not configured.");
+            }
+
+            var client = new MongoClient(settings.ConnectionString);
+            var database = client.GetDatabase(settings.DatabaseName);
+            _collection = database.GetCollection<BsonDocument>(settings.CollectionName);
         }
 
         private static DateTime ReadDateTime(BsonValue value)
@@ -75,8 +91,7 @@ namespace FlyWithMe.Api.Data
 
         public async Task<List<FlightPlan>> GetFlightPlansAsync()
         {
-            var collection = GetCollection(DatabaseName, CollectionName);
-            var documents = await collection.Find(new BsonDocument()).ToListAsync();
+            var documents = await _collection.Find(new BsonDocument()).ToListAsync();
             return documents
                 .Select(ConvertBsonToFlightPlan)
                 .OfType<FlightPlan>()
@@ -85,14 +100,12 @@ namespace FlyWithMe.Api.Data
 
         public async Task<FlightPlan?> GetFlightPlanByIdAsync(string flightPlanId)
         {
-            var collection = GetCollection(DatabaseName, CollectionName);
-            var document = await collection.Find(new BsonDocument { ["flight_plan_id"] = flightPlanId }).FirstOrDefaultAsync();
+            var document = await _collection.Find(new BsonDocument { ["flight_plan_id"] = flightPlanId }).FirstOrDefaultAsync();
             return ConvertBsonToFlightPlan(document);
         }
 
         public async Task<TransactionResult> FileFlightPlanAsync(FlightPlan flightPlan)
         {
-            var collection = GetCollection(DatabaseName, CollectionName);
             var document = new BsonDocument
             {
                 ["flight_plan_id"] = Guid.NewGuid().ToString("N"),
@@ -114,7 +127,7 @@ namespace FlyWithMe.Api.Data
 
             try
             {
-                await collection.InsertOneAsync(document);
+                await _collection.InsertOneAsync(document);
                 if (document["_id"].IsObjectId)
                 {
                     return TransactionResult.Success;
@@ -129,7 +142,6 @@ namespace FlyWithMe.Api.Data
 
         public async Task<TransactionResult> UpdateFlightPlanAsync(FlightPlan flightPlan, string flightPlanId)
         {
-            var collection = GetCollection(DatabaseName, CollectionName);
             var filter = new BsonDocument { ["flight_plan_id"] = flightPlanId };
             var update = new BsonDocument
             {
@@ -152,7 +164,7 @@ namespace FlyWithMe.Api.Data
                 }
             };
 
-            var result = await collection.UpdateOneAsync(filter, update);
+            var result = await _collection.UpdateOneAsync(filter, update);
             if (result.MatchedCount == 0)
             {
                 return TransactionResult.NotFound;
@@ -166,10 +178,9 @@ namespace FlyWithMe.Api.Data
 
         public async Task<bool> DeleteFlightPlanAsync(string flightPlanId)
         {
-            var collection = GetCollection(DatabaseName, CollectionName);
             try
             {
-                var result = await collection.DeleteOneAsync(new BsonDocument { ["flight_plan_id"] = flightPlanId });
+                var result = await _collection.DeleteOneAsync(new BsonDocument { ["flight_plan_id"] = flightPlanId });
                 return result.DeletedCount > 0;
             }
             catch (System.Exception)
