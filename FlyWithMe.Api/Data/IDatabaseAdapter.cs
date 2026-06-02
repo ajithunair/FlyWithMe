@@ -9,9 +9,9 @@ namespace FlyWithMe.Api.Data
     public interface IDatabaseAdapter
     {
         Task<List<FlightPlan>> GetFlightPlansAsync();
-        Task<FlightPlan> GetFlightPlanByIdAsync(string flightPlanId);
-        Task<bool> FileFlightPlanAsync(FlightPlan flightPlan);
-        Task<bool> UpdateFlightPlanAsync(FlightPlan flightPlan, string flightPlanId);
+        Task<FlightPlan?> GetFlightPlanByIdAsync(string flightPlanId);
+        Task<TransactionResult> FileFlightPlanAsync(FlightPlan flightPlan);
+        Task<TransactionResult> UpdateFlightPlanAsync(FlightPlan flightPlan, string flightPlanId);
         Task<bool> DeleteFlightPlanAsync(string flightPlanId);  
     }
 }

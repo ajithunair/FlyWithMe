@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 using Models;
@@ -10,12 +11,40 @@ namespace FlyWithMe.Api.Data
 {
     public class MongodbDatabase : IDatabaseAdapter
     {
+        private const string DatabaseName = "flywithme";
+        private const string CollectionName = "flight_plans";
+
         private IMongoCollection<BsonDocument> GetCollection(string databaseName, string collectionName)
         {
             var client = new MongoClient();
             var database = client.GetDatabase(databaseName);
             var collection = database.GetCollection<BsonDocument>(collectionName);
             return collection;
+        }
+
+        private static DateTime ReadDateTime(BsonValue value)
+        {
+            if (value == null || value.IsBsonNull)
+            {
+                return default;
+            }
+
+            if (value.BsonType == BsonType.DateTime)
+            {
+                return value.ToUniversalTime();
+            }
+
+            if (value.BsonType == BsonType.String &&
+                DateTime.TryParse(
+                    value.AsString,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
+                    out var parsedDate))
+            {
+                return parsedDate;
+            }
+
+            throw new FormatException($"Unsupported date value '{value}' for flight plan.");
         }
 
         private FlightPlan? ConvertBsonToFlightPlan(BsonDocument document)
@@ -34,8 +63,8 @@ namespace FlyWithMe.Api.Data
                 FlightType = document["flight_type"].AsString,
                 FuelHours = document["fuel_hours"].AsInt32,
                 FuelMinutes = document["fuel_minutes"].AsInt32,
-                DepartureTime = document["departure_time"].ToUniversalTime(),
-                ArrivalTime = document["estimated_arrival_time"].ToUniversalTime(),
+                DepartureTime = ReadDateTime(document["departure_time"]),
+                ArrivalTime = ReadDateTime(document["estimated_arrival_time"]),
                 DepartureAirport = document["departing_airport"].AsString,
                 ArrivalAirport = document["arrival_airport"].AsString,
                 Route = document["route"].AsString,
@@ -46,26 +75,24 @@ namespace FlyWithMe.Api.Data
 
         public async Task<List<FlightPlan>> GetFlightPlansAsync()
         {
-            var collection = GetCollection("flywithme", "flightplans");
+            var collection = GetCollection(DatabaseName, CollectionName);
             var documents = await collection.Find(new BsonDocument()).ToListAsync();
-            return documents.Select(ConvertBsonToFlightPlan).ToList();
+            return documents
+                .Select(ConvertBsonToFlightPlan)
+                .OfType<FlightPlan>()
+                .ToList();
         }
 
-        public async Task<FlightPlan> GetFlightPlanByIdAsync(string flightPlanId)
+        public async Task<FlightPlan?> GetFlightPlanByIdAsync(string flightPlanId)
         {
-            var collection = GetCollection("flywithme", "flightplans");
+            var collection = GetCollection(DatabaseName, CollectionName);
             var document = await collection.Find(new BsonDocument { ["flight_plan_id"] = flightPlanId }).FirstOrDefaultAsync();
-            var flightPlan = ConvertBsonToFlightPlan(document);
-            if (flightPlan == null)
-            {
-                return new FlightPlan();
-            }
-            return flightPlan;
+            return ConvertBsonToFlightPlan(document);
         }
 
-        public async Task<bool> FileFlightPlanAsync(FlightPlan flightPlan)
+        public async Task<TransactionResult> FileFlightPlanAsync(FlightPlan flightPlan)
         {
-            var collection = GetCollection("flywithme", "flightplans");
+            var collection = GetCollection(DatabaseName, CollectionName);
             var document = new BsonDocument
             {
                 ["flight_plan_id"] = Guid.NewGuid().ToString("N"),
@@ -88,17 +115,21 @@ namespace FlyWithMe.Api.Data
             try
             {
                 await collection.InsertOneAsync(document);
+                if (document["_id"].IsObjectId)
+                {
+                    return TransactionResult.Success;
+                }
+                return TransactionResult.BadRequest;
             }
             catch (System.Exception)
             {
-                return false;
+                return TransactionResult.ServerError;
             }
-            return true;
         }
 
-        public async Task<bool> UpdateFlightPlanAsync(FlightPlan flightPlan, string flightPlanId)
+        public async Task<TransactionResult> UpdateFlightPlanAsync(FlightPlan flightPlan, string flightPlanId)
         {
-            var collection = GetCollection("flywithme", "flightplans");
+            var collection = GetCollection(DatabaseName, CollectionName);
             var filter = new BsonDocument { ["flight_plan_id"] = flightPlanId };
             var update = new BsonDocument
             {
@@ -121,20 +152,21 @@ namespace FlyWithMe.Api.Data
                 }
             };
 
-            try
+            var result = await collection.UpdateOneAsync(filter, update);
+            if (result.MatchedCount == 0)
             {
-                var result = await collection.UpdateOneAsync(filter, update);
-                return result.ModifiedCount > 0;
+                return TransactionResult.NotFound;
             }
-            catch (System.Exception)
+            if (result.ModifiedCount == 0)
             {
-                return false;
-            }   
+                return TransactionResult.BadRequest;
+            }
+            return TransactionResult.Success;
         }
 
         public async Task<bool> DeleteFlightPlanAsync(string flightPlanId)
         {
-            var collection = GetCollection("flywithme", "flightplans");
+            var collection = GetCollection(DatabaseName, CollectionName);
             try
             {
                 var result = await collection.DeleteOneAsync(new BsonDocument { ["flight_plan_id"] = flightPlanId });
